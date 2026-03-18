@@ -131,11 +131,6 @@ def _time_ago(dt):
 def _create_notification(recipient, actor, verb,
                          target_type=None, target_id=None,
                          target_details=None, allow_self=False):
-    """
-    Create an in-app notification.
-    Silently swallows all errors — notifications must never break the main flow.
-    Set allow_self=True for self-notifications (e.g. admin boarding reminder).
-    """
     if not allow_self and recipient == actor:
         return
     try:
@@ -357,7 +352,6 @@ def follow_user(request, user_id):
             follow.delete()
             return Response({'following': False, 'message': 'Unfollowed'}, status=status.HTTP_200_OK)
 
-        # ── Notification: new follower ────────────────────────────────
         _create_notification(
             recipient=target_user,
             actor=request.user,
@@ -968,7 +962,6 @@ def confirm_join(request):
         user_details.trips_registered = current_trips
         user_details.save()
 
-        # ── Notification: member joined trip → admin ──────────────────
         _create_notification(
             recipient      = group.admin,
             actor          = user,
@@ -1035,6 +1028,48 @@ def get_completed_trips(request):
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_postable_trips(request):
+    """Return all trips the user is registered in (upcoming, ongoing, completed)."""
+    try:
+        user = request.user
+        try:
+            user_details = user.details
+        except UserDetails.DoesNotExist:
+            return Response([], status=status.HTTP_200_OK)
+
+        trip_ids = user_details.trips_registered or []
+        today    = timezone.now().date()
+        trips    = Trip.objects.filter(id__in=trip_ids).order_by('start_date')
+
+        result = []
+        for trip in trips:
+            saved = trip.status
+            if saved == 'completed':
+                trip_status = 'completed'
+            elif saved == 'ongoing':
+                trip_status = 'ongoing'
+            elif trip.start_date > today:
+                trip_status = 'upcoming'
+            elif trip.start_date <= today <= trip.end_date:
+                trip_status = 'ongoing'
+            else:
+                trip_status = 'completed'
+
+            result.append({
+                'trip_id':     trip.id,
+                'destination': trip.destination,
+                'start_date':  str(trip.start_date),
+                'end_date':    str(trip.end_date),
+                'status':      trip_status,
+            })
+
+        return Response(result, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 # ── TRIP CANCEL ───────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
@@ -1074,9 +1109,6 @@ def cancel_trip(request, trip_id):
         is_admin    = (user.id == group.admin.id)
         destination = trip.destination
 
-        # ═══════════════════════════════════════════════════════════════
-        # ADMIN CANCEL — cancel trip for everyone
-        # ═══════════════════════════════════════════════════════════════
         if is_admin:
             members_to_notify = []
             for uid in group.members_list:
@@ -1088,10 +1120,9 @@ def cancel_trip(request, trip_id):
                 except User.DoesNotExist:
                     pass
 
-            # ── Notifications: trip cancelled → all members (before deletion) ──
             for member, _, _ in members_to_notify:
                 if member.id == user.id:
-                    continue  # skip admin self-notification
+                    continue
                 _create_notification(
                     recipient      = member,
                     actor          = user,
@@ -1101,7 +1132,6 @@ def cancel_trip(request, trip_id):
                     target_details = {'destination': destination},
                 )
 
-            # Remove trip from every member's trips_registered
             for member, _, _ in members_to_notify:
                 try:
                     details = member.details
@@ -1121,7 +1151,6 @@ def cancel_trip(request, trip_id):
                 pass
             trip.delete()
 
-            # Send cancellation emails
             for _, member_name, member_email in members_to_notify:
                 if not member_email:
                     continue
@@ -1148,14 +1177,10 @@ def cancel_trip(request, trip_id):
                 {'message': f'Trip to {destination} cancelled. All members notified.'},
                 status=status.HTTP_200_OK)
 
-        # ═══════════════════════════════════════════════════════════════
-        # MEMBER CANCEL — remove only this user
-        # ═══════════════════════════════════════════════════════════════
         else:
             member_name  = _get_user_name(user)
             member_email = _get_user_email(user)
 
-            # ── Notification: member left → admin ─────────────────────
             _create_notification(
                 recipient      = group.admin,
                 actor          = user,
@@ -1232,7 +1257,7 @@ def start_trip(request, trip_id):
             return Response({'error': 'Only admin can start the trip'},
                             status=status.HTTP_403_FORBIDDEN)
 
-        admin_id    = group.admin.id
+        admin_id     = group.admin.id
         trip_details = {
             'destination': trip.destination,
             'trip_id':     trip.id,
@@ -1248,7 +1273,6 @@ def start_trip(request, trip_id):
                     user=member_user,
                     defaults={'otp': str(random.randint(1000, 9999))},
                 )
-                # ── Notification: trip started → each member (show OTP) ──
                 _create_notification(
                     recipient      = member_user,
                     actor          = request.user,
@@ -1263,7 +1287,6 @@ def start_trip(request, trip_id):
         trip.status = 'ongoing'
         trip.save()
 
-        # ── Notification: self-reminder for admin to scan OTPs ────────
         AppNotification.objects.create(
             recipient      = request.user,
             actor          = request.user,
@@ -1470,7 +1493,6 @@ def create_post(request):
     for i, url in enumerate(image_urls):
         PostImage.objects.create(post=post, image_url=url, order=i)
 
-    # ── Notifications: posted in trip → all group members ─────────────
     if trip:
         try:
             group = GroupDetails.objects.get(trip=trip)
@@ -1525,7 +1547,6 @@ def toggle_like(request, post_id):
     if not created:
         like.delete()
     else:
-        # ── Notification: post liked → post owner ─────────────────────
         _create_notification(
             recipient      = post.user,
             actor          = request.user,

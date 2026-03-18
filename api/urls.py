@@ -29,6 +29,7 @@ urlpatterns = [
     path('trips/<int:trip_id>/detail/',      views.get_trip_detail),
     path('trips/join/confirm/',              views.confirm_join),
     path('trips/completed/',                 views.get_completed_trips),
+    path('trips/postable/',                  views.get_postable_trips),
 
     # ── Trip Cancel ───────────────────────────────────────────────────────────
     path('trips/<int:trip_id>/cancel/',      views.cancel_trip),
